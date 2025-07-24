@@ -14,6 +14,8 @@ const FirebaseProvider = ({ children }) => {
     const [auth, setAuth] = useState(null);
     const [userId, setUserId] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
+    const [isAdmin, setIsAdmin] = useState(false); // Moved isAdmin state here
+    const [isAdminLoading, setIsAdminLoading] = useState(true); // Moved isAdminLoading state here
 
     useEffect(() => {
         try {
@@ -53,22 +55,46 @@ const FirebaseProvider = ({ children }) => {
             };
             signIn();
 
-            const unsubscribe = onAuthStateChanged(authInstance, (user) => {
-                if (user) {
-                    setUserId(user.uid);
+            const checkAdminStatus = async (user) => {
+                setIsAdminLoading(true); // Start loading when checking status
+                if (user && dbInstance) { // Use dbInstance directly
+                    const appId = dbInstance.app.options.projectId;
+                    const userRoleDocRef = doc(dbInstance, `artifacts/${appId}/public/data/userRoles`, user.uid);
+                    try {
+                        const userRoleDocSnap = await getDoc(userRoleDocRef);
+                        setIsAdmin(userRoleDocSnap.exists() && userRoleDocSnap.data().role === 'admin');
+                    } catch (error) {
+                        console.error("Error fetching admin role:", error);
+                        setIsAdmin(false); // Assume not admin on error
+                    }
                 } else {
-                    setUserId(null);
+                    setIsAdmin(false);
                 }
+                setIsAdminLoading(false); // End loading after check
+            };
+
+            const unsubscribe = onAuthStateChanged(authInstance, (user) => {
+                setUserId(user ? user.uid : null);
                 setIsAuthReady(true);
+                checkAdminStatus(user); // Call checkAdminStatus here whenever auth state changes
             });
+
+            // Initial check if a user is already authenticated (e.g., on page refresh)
+            if (authInstance.currentUser) {
+                checkAdminStatus(authInstance.currentUser);
+            } else {
+                setIsAdminLoading(false); // If no user initially, no loading needed for role check
+            }
+
 
             return () => unsubscribe();
         } catch (error) {
             console.error("Failed to initialize Firebase:", error);
         }
-    }, []);
+    }, []); // Dependencies remain minimal to run once
 
-    if (!isAuthReady) {
+    // Combined loading check for initial Firebase setup and admin status
+    if (!isAuthReady || isAdminLoading) {
         return (
             <div className="flex items-center justify-center min-h-screen bg-gray-100">
                 <div className="text-lg font-semibold text-gray-700">Loading application...</div>
@@ -77,7 +103,7 @@ const FirebaseProvider = ({ children }) => {
     }
 
     return (
-        <FirebaseContext.Provider value={{ app, db, auth, userId, isAuthReady }}>
+        <FirebaseContext.Provider value={{ app, db, auth, userId, isAuthReady, isAdmin, isAdminLoading }}>
             {children}
         </FirebaseContext.Provider>
     );
@@ -102,6 +128,8 @@ const HomePage = ({ onReservationSuccess }) => {
 // Admin Dashboard Page: Contains All Reservations for Admin
 const AdminDashboardPage = () => {
     const [adminSubPage, setAdminSubPage] = useState('all'); // 'all', 'approved', or 'statistics'
+    // isAdmin and isAdminLoading are now directly available from useFirebase in the parent App component
+    // and passed down implicitly or explicitly as needed.
 
     return (
         <div className="flex flex-col items-center justify-center py-8">
@@ -461,17 +489,17 @@ const formatTimestamp = (timestamp) => {
 
 // Admin Reservations List Component (shows ALL reservations)
 const AdminReservations = () => {
-    const { db, isAdmin, isAuthReady } = useFirebase();
+    const { db, isAdmin, isAuthReady, isAdminLoading } = useFirebase(); // Get isAdmin and isAdminLoading from useFirebase
     const [allReservations, setAllReservations] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [filterDate, setFilterDate] = useState('');
-    const { isAdminLoading } = useContext(AdminContext); // Get isAdminLoading from context
 
     useEffect(() => {
-        if (!isAuthReady || !db || !isAdmin || isAdminLoading) { // Wait for isAdminLoading to be false
-            setLoading(false);
+        // Crucial: Only proceed if admin status check is complete AND admin
+        if (isAdminLoading || !isAdmin || !isAuthReady || !db) {
+            setLoading(false); // No data loading if not authorized or still checking
             return;
         }
 
@@ -537,12 +565,13 @@ const AdminReservations = () => {
         }
     };
 
-    if (isAdminLoading) { // Show loading state first
+    if (isAdminLoading) { // Show loading state first for admin permissions
         return <p className="text-center text-gray-600 mt-8">Checking admin permissions...</p>;
     }
-    if (!isAdmin) { // Then check if admin
+    if (!isAdmin) { // Then check if admin, if not loading
         return <p className="text-center text-red-600 mt-8">Access Denied: You are not authorized to view this page.</p>;
     }
+    // Only proceed to data loading if confirmed admin and not in permission checking phase
     if (loading) return <p className="text-center text-gray-600">Loading all reservations...</p>;
     if (error) return <p className="text-center text-red-600">{error}</p>;
 
@@ -625,15 +654,15 @@ const AdminReservations = () => {
 
 // New Component: Approved Reservations List
 const ApprovedReservationsList = () => {
-    const { db, isAuthReady } = useFirebase();
+    const { db, isAdmin, isAuthReady, isAdminLoading } = useFirebase(); // Get isAdmin and isAdminLoading from useFirebase
     const [approvedReservations, setApprovedReservations] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const { isAdmin, isAdminLoading } = useContext(AdminContext); // Get isAdminLoading from context
 
     useEffect(() => {
-        if (!isAuthReady || !db || !isAdmin || isAdminLoading) { // Wait for isAdminLoading to be false
-            setLoading(false);
+        // Crucial: Only proceed if admin status check is complete AND admin
+        if (isAdminLoading || !isAdmin || !isAuthReady || !db) {
+            setLoading(false); // No data loading if not authorized or still checking
             return;
         }
 
@@ -662,12 +691,13 @@ const ApprovedReservationsList = () => {
         return () => unsubscribe();
     }, [db, isAdmin, isAuthReady, isAdminLoading]); // Add isAdminLoading to dependency array
 
-    if (isAdminLoading) { // Show loading state first
+    if (isAdminLoading) { // Show loading state first for admin permissions
         return <p className="text-center text-gray-600 mt-8">Checking admin permissions...</p>;
     }
-    if (!isAdmin) { // Then check if admin
+    if (!isAdmin) { // Then check if admin, if not loading
         return <p className="text-center text-red-600 mt-8">Access Denied: You are not authorized to view this page.</p>;
     }
+    // Only proceed to data loading if confirmed admin and not in permission checking phase
     if (loading) return <p className="text-center text-gray-600">Loading approved reservations...</p>;
     if (error) return <p className="text-center text-red-600">{error}</p>;
 
@@ -699,7 +729,7 @@ const ApprovedReservationsList = () => {
 
 // New Component: Reservation Statistics
 const ReservationStatistics = () => {
-    const { db, isAuthReady } = useFirebase();
+    const { db, isAdmin, isAuthReady, isAdminLoading } = useFirebase(); // Get isAdmin and isAdminLoading from useFirebase
     const [stats, setStats] = useState({
         total: 0,
         pending: 0,
@@ -708,11 +738,11 @@ const ReservationStatistics = () => {
     });
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const { isAdmin, isAdminLoading } = useContext(AdminContext); // Get isAdminLoading from context
 
     useEffect(() => {
-        if (!isAuthReady || !db || !isAdmin || isAdminLoading) { // Wait for isAdminLoading to be false
-            setLoading(false);
+        // Crucial: Only proceed if admin status check is complete AND admin
+        if (isAdminLoading || !isAdmin || !isAuthReady || !db) {
+            setLoading(false); // No data loading if not authorized or still checking
             return;
         }
 
@@ -748,12 +778,13 @@ const ReservationStatistics = () => {
         return () => unsubscribe();
     }, [db, isAdmin, isAuthReady, isAdminLoading]); // Add isAdminLoading to dependency array
 
-    if (isAdminLoading) { // Show loading state first
+    if (isAdminLoading) { // Show loading state first for admin permissions
         return <p className="text-center text-gray-600 mt-8">Checking admin permissions...</p>;
     }
-    if (!isAdmin) { // Then check if admin
+    if (!isAdmin) { // Then check if admin, if not loading
         return <p className="text-center text-red-600 mt-8">Access Denied: You are not authorized to view this page.</p>;
     }
+    // Only proceed to data loading if confirmed admin and not in permission checking phase
     if (loading) return <p className="text-center text-gray-600">Loading statistics...</p>;
     if (error) return <p className="text-center text-red-600">{error}</p>;
 
@@ -801,17 +832,8 @@ const AdminLoginModal = ({ isOpen, onClose, onLoginSuccess }) => {
             const userCredential = await signInWithEmailAndPassword(auth, email, password);
             const user = userCredential.user;
 
-            // Check user's role in Firestore
-            const appId = db.app.options.projectId;
-            const userRoleDocRef = doc(db, `artifacts/${appId}/public/data/userRoles`, user.uid);
-            const userRoleDocSnap = await getDoc(userRoleDocRef);
-
-            if (userRoleDocSnap.exists() && userRoleDocSnap.data().role === 'admin') {
-                onLoginSuccess(); // Call callback to set isAdmin in parent
-            } else {
-                setError('Access Denied: You are not an administrator.');
-                await signOut(auth); // Log out non-admin users immediately
-            }
+            // The onAuthStateChanged listener in FirebaseProvider will now handle setting isAdmin
+            onLoginSuccess(); // Just trigger the parent's success callback to close modal and navigate
         } catch (firebaseError) {
             // Handle Firebase authentication errors
             let errorMessage = 'Login failed. Please try again.';
@@ -886,55 +908,17 @@ const AdminLoginModal = ({ isOpen, onClose, onLoginSuccess }) => {
 };
 
 
-// Create a new context for Admin status
-const AdminContext = createContext(null);
-
 // Main App Component
 const App = () => {
-    const { userId, auth, db } = useFirebase();
+    // isAdmin and isAdminLoading are now directly available from useFirebase
+    const { userId, auth, db, isAdmin, isAdminLoading } = useFirebase();
     const [currentPage, setCurrentPage] = useState('home');
-    const [isAdmin, setIsAdmin] = useState(false);
-    const [isAdminLoading, setIsAdminLoading] = useState(true); // New state for loading admin status
     const [showAdminLoginModal, setShowAdminLoginModal] = useState(false);
     const [showConfirmationModal, setShowConfirmationModal] = useState(false);
     const [reservationDetails, setReservationDetails] = useState(null);
 
-    // Effect to check admin status on auth state change
-    useEffect(() => {
-        const checkAdminStatus = async () => {
-            setIsAdminLoading(true); // Start loading when checking status
-            if (auth.currentUser && db) {
-                const appId = db.app.options.projectId;
-                const userRoleDocRef = doc(db, `artifacts/${appId}/public/data/userRoles`, auth.currentUser.uid);
-                try {
-                    const userRoleDocSnap = await getDoc(userRoleDocRef);
-                    setIsAdmin(userRoleDocSnap.exists() && userRoleDocSnap.data().role === 'admin');
-                } catch (error) {
-                    console.error("Error fetching admin role:", error);
-                    setIsAdmin(false); // Assume not admin on error
-                }
-            } else {
-                setIsAdmin(false);
-            }
-            setIsAdminLoading(false); // End loading after check
-        };
-
-        const unsubscribe = onAuthStateChanged(auth, (user) => {
-            checkAdminStatus(); // Check admin status whenever auth state changes
-        });
-
-        // Also run an initial check on component mount if a user is already authenticated
-        if (auth.currentUser) {
-            checkAdminStatus();
-        } else {
-            setIsAdminLoading(false); // If no user initially, no loading needed for role
-        }
-
-        return () => unsubscribe();
-    }, [auth, db]); // Depend on 'auth' and 'db' instances
-
     const handleAdminLoginSuccess = () => {
-        setIsAdmin(true); // Set isAdmin immediately upon successful login
+        // We no longer set isAdmin here. FirebaseProvider's onAuthStateChanged handles it.
         setShowAdminLoginModal(false);
         setCurrentPage('admin-dashboard'); // Redirect to admin dashboard on successful admin login
     };
@@ -942,7 +926,7 @@ const App = () => {
     const handleAdminLogout = async () => {
         try {
             await signOut(auth);
-            setIsAdmin(false);
+            // isAdmin will be set to false by onAuthStateChanged listener in FirebaseProvider
             setCurrentPage('home');
         } catch (error) {
             console.error("Error logging out:", error);
@@ -959,18 +943,13 @@ const App = () => {
             case 'home':
                 return <HomePage onReservationSuccess={handleReservationSuccess} />;
             case 'admin-dashboard':
-                return (
-                    // Pass isAdmin and isAdminLoading to the AdminContext
-                    <AdminContext.Provider value={{ isAdmin, isAdminLoading }}>
-                        {isAdminLoading ? ( // Show loading message while admin status is being determined
-                            <div className="text-center text-gray-600 mt-8 text-xl font-semibold">Checking admin status...</div>
-                        ) : isAdmin ? ( // Render AdminDashboardPage only if isAdmin is true
-                            <AdminDashboardPage />
-                        ) : ( // Otherwise, show access denied
-                            <p className="text-center text-red-600 mt-8 text-xl font-semibold">Access Denied: You must be an administrator to view this page.</p>
-                        )}
-                    </AdminContext.Provider>
-                );
+                if (isAdminLoading) { // Show loading message while admin status is being determined
+                    return <div className="text-center text-gray-600 mt-8 text-xl font-semibold">Checking admin status...</div>;
+                }
+                if (!isAdmin) { // Render Access Denied if not admin
+                    return <p className="text-center text-red-600 mt-8 text-xl font-semibold">Access Denied: You must be an administrator to view this page.</p>;
+                }
+                return <AdminDashboardPage />; // Render AdminDashboardPage only if isAdmin is true and not loading
             default:
                 return <HomePage onReservationSuccess={handleReservationSuccess} />;
         }
